@@ -79,7 +79,7 @@ static sr_error_info_t sr_errinfo_mem = {
     .err_count = 1
 };
 
-sr_error_t
+int
 sr_api_ret(sr_session_ctx_t *session, sr_error_info_t *err_info)
 {
     sr_error_t err_code = SR_ERR_OK;

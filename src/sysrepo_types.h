@@ -98,10 +98,6 @@ typedef enum {
     SR_CONN_DEFAULT = 0,            /**< No special behaviour. */
     SR_CONN_CACHE_RUNNING = 1,      /**< Always cache running datastore data which makes mainly repeated retrieval of data
                                          much faster. Affects all sessions created on this connection. */
-    SR_CONN_NO_SCHED_CHANGES = 2,   /**< Do not parse internal modules data and apply any scheduled changes. Makes
-                                         creating the connection faster but, obviously, scheduled changes are not applied. */
-    SR_CONN_ERR_ON_SCHED_FAIL = 4   /**< If applying any of the scheduled changes fails, do not create a connection
-                                         and return an error. */
 } sr_conn_flag_t;
 
 /**

@@ -36,7 +36,9 @@
 #include "lyd_mods.h"
 #include "plugins_datastore.h"
 #include "replay.h"
-#include "shm.h"
+#include "shm_ext.h"
+#include "shm_mod.h"
+#include "shm_sub.h"
 
 sr_error_info_t *
 sr_modinfo_add(const struct lys_module *ly_mod, const char *xpath, int no_dup_check, struct sr_mod_info_s *mod_info)
@@ -1206,9 +1208,7 @@ sr_modinfo_module_data_load_yanglib(struct sr_mod_info_s *mod_info, struct sr_mo
     uint32_t content_id;
 
     /* get content-id */
-    if ((err_info = sr_lydmods_get_content_id(SR_CONN_MAIN_SHM(mod_info->conn), mod_info->conn->ly_ctx, &content_id))) {
-        return err_info;
-    }
+    content_id = SR_CONN_MAIN_SHM(mod_info->conn)->content_id;
 
     /* get the data from libyang */
     SR_CHECK_LY_RET(ly_ctx_get_yanglib_data(mod_info->conn->ly_ctx, &mod_data, "%" PRIu32, content_id),
@@ -1651,10 +1651,10 @@ sr_modinfo_module_data_load_srmon(struct sr_mod_info_s *mod_info)
     sr_mod_t *shm_mod;
     sr_rpc_t *shm_rpc;
     const struct lys_module *ly_mod;
-    sr_main_shm_t *main_shm;
+    sr_mod_shm_t *mod_shm;
     uint32_t i, j;
 
-    main_shm = SR_CONN_MAIN_SHM(mod_info->conn);
+    mod_shm = SR_CONN_MOD_SHM(mod_info->conn);
     ly_mod = ly_ctx_get_module_implemented(mod_info->conn->ly_ctx, "sysrepo-monitoring");
     assert(ly_mod);
 
@@ -1662,17 +1662,17 @@ sr_modinfo_module_data_load_srmon(struct sr_mod_info_s *mod_info)
     SR_CHECK_LY_GOTO(lyd_new_inner(NULL, ly_mod, "sysrepo-state", 0, &mod_data), mod_info->conn->ly_ctx, err_info, cleanup);
 
     /* modules */
-    for (i = 0; i < main_shm->mod_count; ++i) {
-        shm_mod = SR_SHM_MOD_IDX(main_shm, i);
+    for (i = 0; i < mod_shm->mod_count; ++i) {
+        shm_mod = SR_SHM_MOD_IDX(mod_shm, i);
         if ((err_info = sr_modinfo_module_srmon_module(mod_info->conn, shm_mod, mod_data))) {
             goto cleanup;
         }
     }
 
     /* RPCs */
-    for (i = 0; i < main_shm->mod_count; ++i) {
-        shm_mod = SR_SHM_MOD_IDX(main_shm, i);
-        shm_rpc = (sr_rpc_t *)(mod_info->conn->main_shm.addr + shm_mod->rpcs);
+    for (i = 0; i < mod_shm->mod_count; ++i) {
+        shm_mod = SR_SHM_MOD_IDX(mod_shm, i);
+        shm_rpc = (sr_rpc_t *)(mod_info->conn->mod_shm.addr + shm_mod->rpcs);
         for (j = 0; j < shm_mod->rpc_count; ++j) {
             if ((err_info = sr_modinfo_module_srmon_rpc(mod_info->conn, &shm_rpc[j], mod_data))) {
                 goto cleanup;
@@ -1851,7 +1851,7 @@ sr_modinfo_mod_new(const struct lys_module *ly_mod, uint32_t mod_type, struct sr
     }
 
     /* find module in SHM */
-    shm_mod = sr_shmmain_find_module(SR_CONN_MAIN_SHM(mod_info->conn), ly_mod->name);
+    shm_mod = sr_shmmod_find_module(SR_CONN_MOD_SHM(mod_info->conn), ly_mod->name);
     SR_CHECK_INT_RET(!shm_mod, err_info);
 
     /* find DS plugin */
@@ -2389,7 +2389,7 @@ sr_modinfo_generate_config_change_notif(struct sr_mod_info_s *mod_info, sr_sessi
     }
 
     /* get this module and check replay support */
-    shm_mod = sr_shmmain_find_module(SR_CONN_MAIN_SHM(mod_info->conn), "ietf-netconf-notifications");
+    shm_mod = sr_shmmod_find_module(SR_CONN_MOD_SHM(mod_info->conn), "ietf-netconf-notifications");
     SR_CHECK_INT_RET(!shm_mod, err_info);
     if (!ATOMIC_LOAD_RELAXED(shm_mod->replay_supp) && !notif_sub_count) {
         /* nothing to do */

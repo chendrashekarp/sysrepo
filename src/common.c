@@ -46,7 +46,10 @@
 #include "modinfo.h"
 #include "plugins_datastore.h"
 #include "plugins_notification.h"
-#include "shm.h"
+#include "shm_ext.h"
+#include "shm_main.h"
+#include "shm_mod.h"
+#include "shm_sub.h"
 #include "sysrepo.h"
 
 /**
@@ -977,7 +980,7 @@ sr_change_sub_del(sr_subscription_ctx_t *subscr, struct modsub_change_s *change_
     (void)has_subs_lock;
 
     /* find module */
-    shm_mod = sr_shmmain_find_module(SR_CONN_MAIN_SHM(subscr->conn), change_subs->module_name);
+    shm_mod = sr_shmmod_find_module(SR_CONN_MOD_SHM(subscr->conn), change_subs->module_name);
     SR_CHECK_INT_RET(!shm_mod, err_info);
 
     /* properly remove the subscription from ext SHM */
@@ -1012,7 +1015,7 @@ sr_oper_sub_del(sr_subscription_ctx_t *subscr, struct modsub_oper_s *oper_subs, 
     (void)has_subs_lock;
 
     /* find module */
-    shm_mod = sr_shmmain_find_module(SR_CONN_MAIN_SHM(subscr->conn), oper_subs->module_name);
+    shm_mod = sr_shmmod_find_module(SR_CONN_MOD_SHM(subscr->conn), oper_subs->module_name);
     SR_CHECK_INT_RET(!shm_mod, err_info);
 
     /* properly remove the subscription from ext SHM */
@@ -1046,7 +1049,7 @@ sr_rpc_sub_del(sr_subscription_ctx_t *subscr, struct opsub_rpc_s *rpc_subs, uint
     (void)has_subs_lock;
 
     /* find RPC/action */
-    shm_rpc = sr_shmmain_find_rpc(SR_CONN_MAIN_SHM(subscr->conn), rpc_subs->path);
+    shm_rpc = sr_shmmod_find_rpc(SR_CONN_MOD_SHM(subscr->conn), rpc_subs->path);
     SR_CHECK_INT_RET(!shm_rpc, err_info);
 
     /* properly remove the subscription from the main SHM */
@@ -1081,7 +1084,7 @@ sr_notif_sub_del(sr_subscription_ctx_t *subscr, struct modsub_notif_s *notif_sub
     (void)has_subs_lock;
 
     /* find module */
-    shm_mod = sr_shmmain_find_module(SR_CONN_MAIN_SHM(subscr->conn), notif_subs->module_name);
+    shm_mod = sr_shmmod_find_module(SR_CONN_MOD_SHM(subscr->conn), notif_subs->module_name);
     SR_CHECK_INT_RET(!shm_mod, err_info);
 
     /* properly remove the subscription from ext SHM */
@@ -1381,7 +1384,7 @@ sr_notif_find_subscriber(sr_conn_ctx_t *conn, const char *mod_name, sr_mod_notif
     sr_mod_t *shm_mod;
     uint32_t i;
 
-    shm_mod = sr_shmmain_find_module(SR_CONN_MAIN_SHM(conn), mod_name);
+    shm_mod = sr_shmmod_find_module(SR_CONN_MOD_SHM(conn), mod_name);
     SR_CHECK_INT_RET(!shm_mod, err_info);
 
     *notif_subs = (sr_mod_notif_sub_t *)(conn->ext_shm.addr + shm_mod->notif_subs);
@@ -1912,7 +1915,7 @@ sr_file_exists(const char *path)
  * @return err_info, NULL on success.
  */
 static sr_error_info_t *
-sr_store_module_file(const struct lys_module *ly_mod, const struct lysp_submodule *lysp_submod)
+sr_store_module_yang(const struct lys_module *ly_mod, const struct lysp_submodule *lysp_submod)
 {
     sr_error_info_t *err_info = NULL;
     struct ly_out *out = NULL;
@@ -1961,7 +1964,7 @@ cleanup:
 }
 
 sr_error_info_t *
-sr_remove_module_file_r(const struct lys_module *ly_mod, const struct ly_ctx *new_ctx)
+sr_remove_module_yang_r(const struct lys_module *ly_mod, const struct ly_ctx *new_ctx)
 {
     sr_error_info_t *err_info = NULL;
     char *path;
@@ -2004,7 +2007,7 @@ sr_remove_module_file_r(const struct lys_module *ly_mod, const struct ly_ctx *ne
 
     /* remove all (unused) imports recursively */
     LY_ARRAY_FOR(pmod->imports, u) {
-        if ((err_info = sr_remove_module_file_r(pmod->imports[u].module, new_ctx))) {
+        if ((err_info = sr_remove_module_yang_r(pmod->imports[u].module, new_ctx))) {
             return err_info;
         }
     }
@@ -2039,7 +2042,7 @@ sr_ly_module_is_internal(const struct lys_module *ly_mod)
 }
 
 sr_error_info_t *
-sr_store_module_files(const struct lys_module *ly_mod)
+sr_store_module_yang_r(const struct lys_module *ly_mod)
 {
     sr_error_info_t *err_info = NULL;
     LY_ARRAY_COUNT_TYPE u;
@@ -2050,13 +2053,20 @@ sr_store_module_files(const struct lys_module *ly_mod)
     }
 
     /* store module file */
-    if ((err_info = sr_store_module_file(ly_mod, NULL))) {
+    if ((err_info = sr_store_module_yang(ly_mod, NULL))) {
         return err_info;
     }
 
     /* store files of all submodules */
     LY_ARRAY_FOR(ly_mod->parsed->includes, u) {
-        if ((err_info = sr_store_module_file(ly_mod, ly_mod->parsed->includes[u].submodule))) {
+        if ((err_info = sr_store_module_yang(ly_mod, ly_mod->parsed->includes[u].submodule))) {
+            return err_info;
+        }
+    }
+
+    /* recursively for all imports */
+    LY_ARRAY_FOR(ly_mod->parsed->imports, u) {
+        if ((err_info = sr_store_module_yang_r(ly_mod->parsed->imports[u].module))) {
             return err_info;
         }
     }
@@ -2096,51 +2106,6 @@ sr_module_is_internal(const struct lys_module *ly_mod)
     }
 
     return 0;
-}
-
-sr_error_info_t *
-sr_create_module_imps_incs_r(const struct lys_module *ly_mod, const struct lysp_submodule *lysp_submod)
-{
-    sr_error_info_t *err_info = NULL;
-    struct lysp_import *imports;
-    struct lysp_include *includes;
-    LY_ARRAY_COUNT_TYPE u;
-
-    /* store all imports */
-    imports = (lysp_submod ? lysp_submod->imports : ly_mod->parsed->imports);
-    LY_ARRAY_FOR(imports, u) {
-        if (sr_ly_module_is_internal(imports[u].module)) {
-            /* skip */
-            continue;
-        }
-
-        if ((err_info = sr_store_module_files(imports[u].module))) {
-            return err_info;
-        }
-
-        if ((err_info = sr_create_module_imps_incs_r(imports[u].module, NULL))) {
-            return err_info;
-        }
-    }
-
-    if (lysp_submod) {
-        /* all submodules are in the main module */
-        return NULL;
-    }
-
-    /* store all includes */
-    includes = ly_mod->parsed->includes;
-    LY_ARRAY_FOR(includes, u) {
-        if ((err_info = sr_store_module_file(ly_mod, includes[u].submodule))) {
-            return err_info;
-        }
-
-        if ((err_info = sr_create_module_imps_incs_r(ly_mod, includes[u].submodule))) {
-            return err_info;
-        }
-    }
-
-    return NULL;
 }
 
 /**
@@ -2440,7 +2405,7 @@ sr_perm_check(sr_conn_ctx_t *conn, const struct lys_module *ly_mod, sr_datastore
     int rc, r, w;
 
     /* find the module in SHM */
-    shm_mod = sr_shmmain_find_module(SR_CONN_MAIN_SHM(conn), ly_mod->name);
+    shm_mod = sr_shmmod_find_module(SR_CONN_MOD_SHM(conn), ly_mod->name);
     SR_CHECK_INT_GOTO(!shm_mod, err_info, cleanup);
 
     /* find the DS plugin for startup */

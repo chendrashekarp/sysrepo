@@ -33,9 +33,10 @@
 
 #include "compat.h"
 #include "config.h"
+#include "context_change.h"
 #include "log.h"
 #include "plugins_notification.h"
-#include "shm.h"
+#include "shm_mod.h"
 #include "sysrepo.h"
 
 /**
@@ -82,15 +83,16 @@ cleanup:
 /**
  * @brief Store the notification into the notification buffer.
  *
- * @param[in] notif_buf Notification buffer.
+ * @param[in] sess Session with the buffer.
  * @param[in] notif Notification data tree.
  * @param[in] notif_ts Notification timestamp.
  * @return err_info, NULL on success.
  */
 static sr_error_info_t *
-sr_notif_buf_store(struct sr_sess_notif_buf *notif_buf, const struct lyd_node *notif, struct timespec notif_ts)
+sr_notif_buf_store(sr_session_ctx_t *sess, const struct lyd_node *notif, struct timespec notif_ts)
 {
     sr_error_info_t *err_info = NULL;
+    struct sr_sess_notif_buf *notif_buf = &sess->notif_buf;
     struct sr_sess_notif_buf_node *node = NULL;
     struct timespec timeout_ts;
     int ret;
@@ -120,6 +122,11 @@ sr_notif_buf_store(struct sr_sess_notif_buf *notif_buf, const struct lyd_node *n
         notif_buf->last->next = node;
         notif_buf->last = node;
     } else {
+        /* CONTEXT LOCK */
+        if ((err_info = sr_lycc_lock(sess->conn, SR_LOCK_READ))) {
+            goto error;
+        }
+
         assert(!notif_buf->first);
         notif_buf->first = node;
         notif_buf->last = node;
@@ -164,7 +171,7 @@ sr_replay_store(sr_session_ctx_t *sess, const struct lyd_node *notif, struct tim
     SR_CHECK_INT_RET(notif_op->schema->nodetype != LYS_NOTIF, err_info);
 
     /* find SHM mod for replay lock and check if replay is even supported */
-    shm_mod = sr_shmmain_find_module(SR_CONN_MAIN_SHM(sess->conn), ly_mod->name);
+    shm_mod = sr_shmmod_find_module(SR_CONN_MOD_SHM(sess->conn), ly_mod->name);
     SR_CHECK_INT_RET(!shm_mod, err_info);
 
     if (!ATOMIC_LOAD_RELAXED(shm_mod->replay_supp)) {
@@ -174,7 +181,7 @@ sr_replay_store(sr_session_ctx_t *sess, const struct lyd_node *notif, struct tim
 
     if (ATOMIC_LOAD_RELAXED(sess->notif_buf.thread_running)) {
         /* store the notification in the buffer */
-        if ((err_info = sr_notif_buf_store(&sess->notif_buf, notif, notif_ts))) {
+        if ((err_info = sr_notif_buf_store(sess, notif, notif_ts))) {
             return err_info;
         }
         SR_LOG_INF("Notification \"%s\" buffered to be stored for replay.", notif_op->schema->name);
@@ -205,7 +212,7 @@ sr_notif_buf_thread_write_notifs(sr_conn_ctx_t *conn, struct sr_sess_notif_buf_n
 
     while (first) {
         /* find SHM mod */
-        shm_mod = sr_shmmain_find_module(SR_CONN_MAIN_SHM(conn), lyd_owner_module(first->notif)->name);
+        shm_mod = sr_shmmod_find_module(SR_CONN_MOD_SHM(conn), lyd_owner_module(first->notif)->name);
         if (!shm_mod) {
             SR_ERRINFO_INT(&err_info);
             return err_info;
@@ -223,6 +230,9 @@ sr_notif_buf_thread_write_notifs(sr_conn_ctx_t *conn, struct sr_sess_notif_buf_n
         lyd_free_siblings(prev->notif);
         free(prev);
     }
+
+    /* CONTEXT UNLOCK */
+    sr_lycc_unlock(conn, SR_LOCK_READ);
 
     return NULL;
 }
@@ -314,7 +324,7 @@ sr_replay_notify(sr_conn_ctx_t *conn, const char *mod_name, uint32_t sub_id, con
     int rc;
 
     /* find SHM mod for replay lock and check if replay is even supported */
-    shm_mod = sr_shmmain_find_module(SR_CONN_MAIN_SHM(conn), mod_name);
+    shm_mod = sr_shmmod_find_module(SR_CONN_MOD_SHM(conn), mod_name);
     SR_CHECK_INT_GOTO(!shm_mod, err_info, cleanup);
 
     if (!ATOMIC_LOAD_RELAXED(shm_mod->replay_supp)) {
